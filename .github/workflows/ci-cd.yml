@@ -1,0 +1,112 @@
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "✅ Code checkout"
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Backend install
+        working-directory: backend
+        run: npm ci
+
+      - name: "✅ Unit tests (backend)"
+        working-directory: backend
+        run: npm test
+
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+
+      - name: "✅ Linting (frontend)"
+        working-directory: frontend
+        run: npm run lint
+
+      - name: "✅ Build (frontend)"
+        working-directory: frontend
+        run: npm run build
+
+  build-and-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: "✅ Code checkout"
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "✅ Docker image creation + push (backend)"
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-backend:${{ github.sha }}
+            ghcr.io/${{ github.repository }}-backend:latest
+
+      - name: "✅ Docker image creation + push (frontend)"
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-frontend:${{ github.sha }}
+            ghcr.io/${{ github.repository }}-frontend:latest
+
+      - name: Configure kubectl
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG_DATA }}
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "$KUBECONFIG_DATA" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl version --client=true
+
+      - name: "✅ Deploy (Kubernetes)"
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl -n todo-app create secret generic todo-secrets \
+            --from-literal=MONGO_URI="$MONGO_URI" \
+            --from-literal=JWT_SECRET="$JWT_SECRET" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f k8s/backend-service.yaml
+          kubectl apply -f k8s/backend-deployment.yaml
+          kubectl apply -f k8s/frontend-service.yaml
+          kubectl apply -f k8s/frontend-deployment.yaml
+          kubectl apply -f k8s/ingress.yaml
+
+      - name: Rollout new images
+        run: |
+          kubectl -n todo-app set image deployment/todo-backend backend=ghcr.io/${{ github.repository }}-backend:${{ github.sha }}
+          kubectl -n todo-app set image deployment/todo-frontend frontend=ghcr.io/${{ github.repository }}-frontend:${{ github.sha }}
+          kubectl -n todo-app rollout status deployment/todo-backend --timeout=180s
+          kubectl -n todo-app rollout status deployment/todo-frontend --timeout=180s
