@@ -47,6 +47,8 @@ jobs:
   build-and-deploy:
     needs: test
     runs-on: ubuntu-latest
+    env:
+      HAS_DEPLOY_SECRETS: ${{ secrets.KUBECONFIG_DATA != '' && secrets.MONGO_URI != '' && secrets.JWT_SECRET != '' }}
     steps:
       - name: "✅ Code checkout"
         uses: actions/checkout@v4
@@ -79,7 +81,14 @@ jobs:
             ghcr.io/${{ github.repository }}-frontend:${{ github.sha }}
             ghcr.io/${{ github.repository }}-frontend:latest
 
+      - name: Setup kubectl
+        if: env.HAS_DEPLOY_SECRETS == 'true'
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.0
+
       - name: Configure kubectl
+        if: env.HAS_DEPLOY_SECRETS == 'true'
         env:
           KUBECONFIG_DATA: ${{ secrets.KUBECONFIG_DATA }}
         run: |
@@ -89,6 +98,7 @@ jobs:
           kubectl version --client=true
 
       - name: "✅ Deploy (Kubernetes)"
+        if: env.HAS_DEPLOY_SECRETS == 'true'
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
@@ -105,8 +115,15 @@ jobs:
           kubectl apply -f k8s/ingress.yaml
 
       - name: Rollout new images
+        if: env.HAS_DEPLOY_SECRETS == 'true'
         run: |
           kubectl -n todo-app set image deployment/todo-backend backend=ghcr.io/${{ github.repository }}-backend:${{ github.sha }}
           kubectl -n todo-app set image deployment/todo-frontend frontend=ghcr.io/${{ github.repository }}-frontend:${{ github.sha }}
           kubectl -n todo-app rollout status deployment/todo-backend --timeout=180s
           kubectl -n todo-app rollout status deployment/todo-frontend --timeout=180s
+
+      - name: Deploy skipped (missing secrets)
+        if: env.HAS_DEPLOY_SECRETS != 'true'
+        run: |
+          echo "Deployment steps were skipped because required secrets are missing."
+          echo "Add GitHub repo secrets: KUBECONFIG_DATA, MONGO_URI, JWT_SECRET"
