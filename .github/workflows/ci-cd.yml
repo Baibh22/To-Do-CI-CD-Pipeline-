@@ -81,6 +81,59 @@ jobs:
             ghcr.io/${{ github.repository }}-frontend:${{ github.sha }}
             ghcr.io/${{ github.repository }}-frontend:latest
 
+      - name: "✅ Deploy (Docker smoke test)"
+        env:
+          BACKEND_IMAGE: ghcr.io/${{ github.repository }}-backend:${{ github.sha }}
+          FRONTEND_IMAGE: ghcr.io/${{ github.repository }}-frontend:${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          docker network create todo-smoke-net
+
+          docker run -d --name todo-smoke-mongo --network todo-smoke-net \
+            -e MONGO_INITDB_DATABASE=todo_app \
+            mongo:7
+
+          for i in $(seq 1 30); do
+            if docker exec todo-smoke-mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 })' > /dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+
+          docker pull "$BACKEND_IMAGE"
+          docker run -d --name todo-smoke-backend --network todo-smoke-net -p 5000:5000 \
+            -e MONGO_URI=mongodb://todo-smoke-mongo:27017/todo_app \
+            -e JWT_SECRET=ci_smoke_secret_key_change_me \
+            "$BACKEND_IMAGE"
+
+          docker pull "$FRONTEND_IMAGE"
+          docker run -d --name todo-smoke-frontend --network todo-smoke-net -p 8080:80 \
+            "$FRONTEND_IMAGE"
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:5000/health > /dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+          curl -fsS http://localhost:5000/health
+          curl -fsS http://localhost:8080/ > /dev/null
+
+          curl -fsS -X POST http://localhost:5000/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"name":"CI User","email":"ci@example.com","password":"passw0rd"}' > /dev/null
+
+          TOKEN="$(curl -fsS -X POST http://localhost:5000/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"ci@example.com","password":"passw0rd"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+
+          curl -fsS -X POST http://localhost:5000/api/todos \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"title":"Smoke task"}' > /dev/null
+
       - name: Setup kubectl
         if: env.HAS_DEPLOY_SECRETS == 'true'
         uses: azure/setup-kubectl@v4
@@ -127,3 +180,9 @@ jobs:
         run: |
           echo "Deployment steps were skipped because required secrets are missing."
           echo "Add GitHub repo secrets: KUBECONFIG_DATA, MONGO_URI, JWT_SECRET"
+
+      - name: Cleanup Docker smoke test
+        if: always()
+        run: |
+          docker rm -f todo-smoke-backend todo-smoke-frontend todo-smoke-mongo >/dev/null 2>&1 || true
+          docker network rm todo-smoke-net >/dev/null 2>&1 || true
