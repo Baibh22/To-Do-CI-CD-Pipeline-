@@ -184,6 +184,57 @@ jobs:
           echo "Deployment steps were skipped because required secrets are missing."
           echo "Add GitHub repo secrets: KUBECONFIG_DATA, MONGO_URI, JWT_SECRET"
 
+      - name: Deploy skipped (Render hooks missing)
+        if: secrets.RENDER_DEPLOY_HOOK_BACKEND == '' && secrets.RENDER_DEPLOY_HOOK_FRONTEND == ''
+        run: |
+          echo "Render deploy skipped because deploy hook secrets are missing."
+          echo "Add GitHub repo secrets: RENDER_DEPLOY_HOOK_BACKEND, RENDER_DEPLOY_HOOK_FRONTEND"
+
+      - name: "✅ Deploy (Render backend)"
+        if: secrets.RENDER_DEPLOY_HOOK_BACKEND != ''
+        env:
+          RENDER_DEPLOY_HOOK_BACKEND: ${{ secrets.RENDER_DEPLOY_HOOK_BACKEND }}
+        run: |
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK_BACKEND" > /dev/null
+
+      - name: "✅ Deploy (Render frontend)"
+        if: secrets.RENDER_DEPLOY_HOOK_FRONTEND != ''
+        env:
+          RENDER_DEPLOY_HOOK_FRONTEND: ${{ secrets.RENDER_DEPLOY_HOOK_FRONTEND }}
+        run: |
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK_FRONTEND" > /dev/null
+
+      - name: "✅ Health check (Render backend)"
+        if: secrets.RENDER_BACKEND_URL != ''
+        env:
+          RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 40); do
+            if curl -fsS "$RENDER_BACKEND_URL/health" > /dev/null; then
+              curl -fsS "$RENDER_BACKEND_URL/health"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Render backend health check failed"
+          exit 1
+
+      - name: "✅ Health check (Render frontend)"
+        if: secrets.RENDER_FRONTEND_URL != ''
+        env:
+          RENDER_FRONTEND_URL: ${{ secrets.RENDER_FRONTEND_URL }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 40); do
+            if curl -fsS "$RENDER_FRONTEND_URL/" > /dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Render frontend health check failed"
+          exit 1
+
       - name: Cleanup Docker smoke test
         if: always()
         run: |
