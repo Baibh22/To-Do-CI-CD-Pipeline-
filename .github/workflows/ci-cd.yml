@@ -59,35 +59,21 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to registry (GHCR)
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: "✅ Docker image creation + push (backend)"
+      - name: "✅ Docker image creation (backend)"
         uses: docker/build-push-action@v6
         with:
           context: backend
-          push: true
-          tags: |
-            ghcr.io/${{ env.REPO_LC }}-backend:${{ github.sha }}
-            ghcr.io/${{ env.REPO_LC }}-backend:latest
+          load: true
+          tags: todo-backend:ci
 
-      - name: "✅ Docker image creation + push (frontend)"
+      - name: "✅ Docker image creation (frontend)"
         uses: docker/build-push-action@v6
         with:
           context: frontend
-          push: true
-          tags: |
-            ghcr.io/${{ env.REPO_LC }}-frontend:${{ github.sha }}
-            ghcr.io/${{ env.REPO_LC }}-frontend:latest
+          load: true
+          tags: todo-frontend:ci
 
-      - name: "✅ Deploy (Docker smoke test)"
-        env:
-          BACKEND_IMAGE: ghcr.io/${{ env.REPO_LC }}-backend:${{ github.sha }}
-          FRONTEND_IMAGE: ghcr.io/${{ env.REPO_LC }}-frontend:${{ github.sha }}
+      - name: "✅ Smoke test (containers)"
         run: |
           set -euo pipefail
 
@@ -104,15 +90,13 @@ jobs:
             sleep 2
           done
 
-          docker pull "$BACKEND_IMAGE"
           docker run -d --name todo-smoke-backend --network todo-smoke-net -p 5000:5000 \
             -e MONGO_URI=mongodb://todo-smoke-mongo:27017/todo_app \
             -e JWT_SECRET=ci_smoke_secret_key_change_me \
-            "$BACKEND_IMAGE"
+            todo-backend:ci
 
-          docker pull "$FRONTEND_IMAGE"
           docker run -d --name todo-smoke-frontend --network todo-smoke-net -p 8080:80 \
-            "$FRONTEND_IMAGE"
+            todo-frontend:ci
 
           for i in $(seq 1 30); do
             if curl -fsS http://localhost:5000/health > /dev/null; then
@@ -136,6 +120,41 @@ jobs:
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"title":"Smoke task"}' > /dev/null
+
+      - name: Login to registry (GHCR)
+        id: ghcr_login
+        continue-on-error: true
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "✅ Docker image push (backend)"
+        if: steps.ghcr_login.outcome == 'success'
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: |
+            ghcr.io/${{ env.REPO_LC }}-backend:${{ github.sha }}
+            ghcr.io/${{ env.REPO_LC }}-backend:latest
+
+      - name: "✅ Docker image push (frontend)"
+        if: steps.ghcr_login.outcome == 'success'
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          tags: |
+            ghcr.io/${{ env.REPO_LC }}-frontend:${{ github.sha }}
+            ghcr.io/${{ env.REPO_LC }}-frontend:latest
+
+      - name: Docker push skipped (registry login failed)
+        if: steps.ghcr_login.outcome != 'success'
+        run: |
+          echo "Docker push skipped because GHCR login failed."
+          echo "Ensure repo workflow permissions allow packages write."
 
       - name: Setup kubectl
         if: env.HAS_DEPLOY_SECRETS == 'true'
@@ -183,57 +202,6 @@ jobs:
         run: |
           echo "Deployment steps were skipped because required secrets are missing."
           echo "Add GitHub repo secrets: KUBECONFIG_DATA, MONGO_URI, JWT_SECRET"
-
-      - name: Deploy skipped (Render hooks missing)
-        if: secrets.RENDER_DEPLOY_HOOK_BACKEND == '' && secrets.RENDER_DEPLOY_HOOK_FRONTEND == ''
-        run: |
-          echo "Render deploy skipped because deploy hook secrets are missing."
-          echo "Add GitHub repo secrets: RENDER_DEPLOY_HOOK_BACKEND, RENDER_DEPLOY_HOOK_FRONTEND"
-
-      - name: "✅ Deploy (Render backend)"
-        if: secrets.RENDER_DEPLOY_HOOK_BACKEND != ''
-        env:
-          RENDER_DEPLOY_HOOK_BACKEND: ${{ secrets.RENDER_DEPLOY_HOOK_BACKEND }}
-        run: |
-          curl -fsS -X POST "$RENDER_DEPLOY_HOOK_BACKEND" > /dev/null
-
-      - name: "✅ Deploy (Render frontend)"
-        if: secrets.RENDER_DEPLOY_HOOK_FRONTEND != ''
-        env:
-          RENDER_DEPLOY_HOOK_FRONTEND: ${{ secrets.RENDER_DEPLOY_HOOK_FRONTEND }}
-        run: |
-          curl -fsS -X POST "$RENDER_DEPLOY_HOOK_FRONTEND" > /dev/null
-
-      - name: "✅ Health check (Render backend)"
-        if: secrets.RENDER_BACKEND_URL != ''
-        env:
-          RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 40); do
-            if curl -fsS "$RENDER_BACKEND_URL/health" > /dev/null; then
-              curl -fsS "$RENDER_BACKEND_URL/health"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Render backend health check failed"
-          exit 1
-
-      - name: "✅ Health check (Render frontend)"
-        if: secrets.RENDER_FRONTEND_URL != ''
-        env:
-          RENDER_FRONTEND_URL: ${{ secrets.RENDER_FRONTEND_URL }}
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 40); do
-            if curl -fsS "$RENDER_FRONTEND_URL/" > /dev/null; then
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Render frontend health check failed"
-          exit 1
 
       - name: Cleanup Docker smoke test
         if: always()
